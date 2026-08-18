@@ -28,18 +28,27 @@ def _mark_greeted(visitor_id: int) -> None:
         _last_greeting_time[visitor_id] = time.time()
 
 def _append_chat(app, who: str, text: str) -> None:
-    """Add message to chat log with Host on the left and Visitor on the right."""
-    app.chat_log.config(state=tk.NORMAL)
-    app.chat_log.tag_configure("host", justify="left", lmargin1=4, lmargin2=4, foreground="#4fc3f7")
-    app.chat_log.tag_configure("visitor", justify="right", rmargin=4, foreground="#81c784")
+    """Add message to chat log safely on the Tkinter main thread."""
+    def _do_append():
+        try:
+            app.chat_log.config(state=tk.NORMAL)
+            app.chat_log.tag_configure("host", justify="left", lmargin1=4, lmargin2=4, foreground="#4fc3f7")
+            app.chat_log.tag_configure("visitor", justify="right", rmargin=4, foreground="#81c784")
 
-    if who == "Visitor":
-        app.chat_log.insert(tk.END, f"{who}: {text}\n", "visitor")
+            if who == "Visitor":
+                app.chat_log.insert(tk.END, f"{who}: {text}\n", "visitor")
+            else:
+                app.chat_log.insert(tk.END, f"{who}: {text}\n", "host")
+
+            app.chat_log.see(tk.END)
+            app.chat_log.config(state=tk.DISABLED)
+        except Exception as e:
+            logger.error("Error updating chat log: %s", e)
+
+    if threading.current_thread() is threading.main_thread():
+        _do_append()
     else:
-        app.chat_log.insert(tk.END, f"{who}: {text}\n", "host")
-
-    app.chat_log.see(tk.END)
-    app.chat_log.config(state=tk.DISABLED)
+        app.after(0, _do_append)
 
 
 def _host_say(app, text: str) -> None:
@@ -56,14 +65,14 @@ def _greet_returning(visitor_id: int, name: str, set_status, app) -> None:
     logger.info("Returning visitor %s: %s", name, message)
     _host_say(app, message)
     _dashboard.record_visitor(visitor_id, name, "return")
-    app._update_visitor_count()
+    app.after(0, app._update_visitor_count)
 
     # Start conversation with returning visitor
     _start_conversation(visitor_id, name, set_status, app)
 
 def _greet_new(encoding: np.ndarray, set_status, app) -> None:
     set_status("New visitor - greeting and asking for name...", "orange")
-    warm_greeting = "Hi there, welcome! It is really nice to meet you. What name would you like me to call you?"
+    warm_greeting = "Hi there, welcome to our open house! It is really nice to meet you. What name would you like me to call you?"
     _host_say(app, warm_greeting)
     heard_name = stt.capture_name(timeout=10, phrase_time_limit=5)
 
@@ -85,7 +94,7 @@ def _greet_new(encoding: np.ndarray, set_status, app) -> None:
     logger.info("New visitor %s: %s", name, message)
     _host_say(app, message)
     _dashboard.record_visitor(visitor_id, name, "new")
-    app._update_visitor_count()
+    app.after(0, app._update_visitor_count)
 
     # Start conversation with new visitor
     _start_conversation(visitor_id, name, set_status, app)
@@ -93,7 +102,7 @@ def _greet_new(encoding: np.ndarray, set_status, app) -> None:
 
 def _start_conversation(visitor_id: int, name: str, set_status, app) -> None:
     """Start continuous conversation with visitor."""
-    time.sleep(2)  # Wait for greeting to finish
+    time.sleep(1)  # Wait briefly after initial greeting
 
     for _ in range(3):  # Allow up to 3 exchanges
         set_status(f"Listening to {name}...", "blue")
@@ -119,12 +128,12 @@ def _start_conversation(visitor_id: int, name: str, set_status, app) -> None:
 
         # Ask if they want to continue
         time.sleep(1)
-        continue_prompt = "Would you like to continue?"
+        continue_prompt = "Would you like to ask anything else about the house?"
         _host_say(app, continue_prompt)
-        continue_response = stt.capture_name(timeout=5, phrase_time_limit=3)
+        continue_response = stt.capture_name(timeout=5, phrase_time_limit=4)
 
-        if not continue_response or "no" in continue_response.lower():
-            _host_say(app, f"Thank you for visiting, {name}! See you next time!")
+        if not continue_response or any(kw in continue_response.lower() for kw in ["no", "nope", "that's all", "bye"]):
+            _host_say(app, f"Thank you for visiting, {name}! Enjoy taking a look around!")
             break
 
         _append_chat(app, "Visitor", continue_response)
@@ -236,11 +245,38 @@ class OpenhouseApp(tk.Tk):
             right_frame, height=12, width=35, font=("Courier", 9), bg="#16213e", fg="#eee", state=tk.DISABLED
         )
         self.chat_log.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Interactive manual input field for testing or typing questions
+        input_frame = ttk.Frame(right_frame)
+        input_frame.pack(fill=tk.X, pady=5)
+        self.msg_entry = ttk.Entry(input_frame)
+        self.msg_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.msg_entry.bind("<Return>", lambda event: self._send_manual_message())
+        ttk.Button(input_frame, text="Send", command=self._send_manual_message).pack(side=tk.RIGHT)
         
         ttk.Button(right_frame, text="View Dashboard", command=self._show_dashboard).pack(pady=5)
     
+    def _send_manual_message(self):
+        text = self.msg_entry.get().strip()
+        if not text:
+            return
+        self.msg_entry.delete(0, tk.END)
+        _append_chat(self, "Visitor", text)
+
+        def _process():
+            self._set_status("Thinking...", "blue")
+            reply = llm.generate_chat_response(text)
+            self._set_status(f"Host: {reply}", "green")
+            _host_say(self, reply)
+            self._set_status("Ready - waiting for next visitor", "green")
+
+        threading.Thread(target=_process, daemon=True).start()
+
     def _set_status(self, msg, color="gray"):
-        self.status_var.set(msg)
+        if threading.current_thread() is threading.main_thread():
+            self.status_var.set(msg)
+        else:
+            self.after(0, lambda: self.status_var.set(msg))
     
     def _set_frame(self, frame):
         self.current_frame = frame

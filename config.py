@@ -10,6 +10,9 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / ".openhouse" / "visitors.db"
 LOG_DIR = Path(os.getenv("LOG_DIR", ".openhouse/logs"))
 
+# Openhouse Documentation
+OPENHOUSE_DOC_PATH = BASE_DIR / os.getenv("OPENHOUSE_DOC_FILENAME", "openhouse.md")
+
 # LLM
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "nokey")

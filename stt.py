@@ -1,29 +1,31 @@
-"""Speech-to-text for capturing a visitor's name via microphone."""
+"""Speech-to-text for capturing visitor voice responses via microphone."""
 
+import logging
+import numpy as np
 import speech_recognition as sr
 import sounddevice as sd
-import numpy as np
 import config
+
+logger = logging.getLogger("openhouse")
 
 
 def capture_name(timeout: int | None = None, phrase_time_limit: int | None = None) -> str | None:
     """Listen for a voice response and return the transcribed text, or None on failure.
 
     Uses Google Speech Recognition (free, requires internet).
-    Uses sounddevice for audio capture (works with Python 3.14+).
+    Uses sounddevice for audio capture.
     Falls back gracefully if no speech is detected.
     """
     try:
         recognizer = sr.Recognizer()
 
-        timeout = timeout or config.STT_TIMEOUT
-        phrase_time_limit = phrase_time_limit or min(timeout, 8)
+        timeout_val = timeout or getattr(config, "STT_TIMEOUT", 10)
+        limit_val = phrase_time_limit or getattr(config, "STT_PHRASE_TIME_LIMIT", 5)
+        duration = min(timeout_val, limit_val) if (timeout and phrase_time_limit) else (phrase_time_limit or timeout_val)
 
-        print("[stt] Listening for your response...")
+        logger.info("[stt] Listening for response (duration: %ss)...", duration)
 
-        # Record audio using sounddevice
         sample_rate = 16000
-        duration = timeout
 
         try:
             # Record audio from microphone
@@ -34,21 +36,22 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
             audio_bytes = audio_data.tobytes()
             audio = sr.AudioData(audio_bytes, sample_rate, 2)
 
-            # Recognize speech using Google
-            text = recognizer.recognize_google(audio, language=config.STT_LANGUAGE).strip()
+            # Recognize speech using Google Speech Recognition
+            stt_lang = getattr(config, "STT_LANGUAGE", "en")
+            text = recognizer.recognize_google(audio, language=stt_lang).strip()
             if text:
-                print(f"[stt] Heard: {text}")
+                logger.info("[stt] Heard: %s", text)
                 return text
         except Exception as e:
-            print(f"[stt] Audio recording error: {e}")
+            logger.debug("[stt] Audio recording or recognition error: %s", e)
 
     except sr.WaitTimeoutError:
-        print("[stt] No speech detected within timeout.")
+        logger.info("[stt] No speech detected within timeout.")
     except sr.UnknownValueError:
-        print("[stt] Could not understand audio.")
+        logger.info("[stt] Could not understand audio.")
     except sr.RequestError as e:
-        print(f"[stt] Speech recognition service error: {e}")
+        logger.warning("[stt] Speech recognition service error: %s", e)
     except Exception as e:
-        print(f"[stt] Unexpected error: {e}")
+        logger.error("[stt] Unexpected STT error: %s", e)
 
     return None
