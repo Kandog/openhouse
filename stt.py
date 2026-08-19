@@ -165,19 +165,37 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
         audio_bytes = resampled_audio.tobytes()
         audio = sr.AudioData(audio_bytes, target_sr, 2)
 
-        # Perform Speech Recognition
+        # Perform Speech Recognition with retries and fallback
         stt_lang = getattr(config, "STT_LANGUAGE", "en")
+
+        # Try Google Speech Recognition with up to 3 retries for socket / network errors
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                text = recognizer.recognize_google(audio, language=stt_lang).strip()
+                if text:
+                    logger.info("[stt] Heard: %s", text)
+                    return text
+            except sr.UnknownValueError:
+                logger.info("[stt] Speech was detected but could not be understood.")
+                break
+            except sr.RequestError as req_err:
+                logger.warning("[stt] Speech recognition service error (attempt %d/%d): %s", attempt, max_retries, req_err)
+                if attempt < max_retries:
+                    time.sleep(0.3 * attempt)
+            except Exception as rec_err:
+                logger.warning("[stt] Speech recognition connection or unexpected error (attempt %d/%d): %s", attempt, max_retries, rec_err)
+                if attempt < max_retries:
+                    time.sleep(0.3 * attempt)
+
+        # Optional offline fallback using recognize_sphinx if installed
         try:
-            text = recognizer.recognize_google(audio, language=stt_lang).strip()
+            text = recognizer.recognize_sphinx(audio, language=stt_lang).strip()
             if text:
-                logger.info("[stt] Heard: %s", text)
+                logger.info("[stt] Heard (via sphinx fallback): %s", text)
                 return text
-        except sr.UnknownValueError:
-            logger.info("[stt] Speech was detected but could not be understood.")
-        except sr.RequestError as req_err:
-            logger.warning("[stt] Speech recognition service error: %s", req_err)
-        except Exception as rec_err:
-            logger.error("[stt] Speech recognition failed: %s", rec_err)
+        except Exception:
+            pass
 
     except sr.WaitTimeoutError:
         logger.info("[stt] No speech detected within timeout.")

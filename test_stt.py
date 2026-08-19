@@ -90,6 +90,40 @@ class TestSTT(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(stt.is_mic_muted())
 
+    @patch("stt.sd.InputStream")
+    @patch("stt.sr.Recognizer")
+    def test_capture_name_retry_on_network_error(self, mock_recognizer_cls, mock_input_stream_cls):
+        # Mock Speech Recognition with initial connection error then success
+        mock_rec_instance = MagicMock()
+        mock_rec_instance.recognize_google.side_effect = [
+            OSError("[WinError 10054] An existing connection was forcibly closed"),
+            "Retry Success",
+        ]
+        mock_recognizer_cls.return_value = mock_rec_instance
+
+        # Mock sounddevice InputStream
+        mock_stream = MagicMock()
+        mock_input_stream_cls.return_value.__enter__.return_value = mock_stream
+
+        high_energy_chunk = np.full((1600, 1), 1000, dtype=np.int16)
+        silent_chunk = np.zeros((1600, 1), dtype=np.int16)
+
+        stream_reads = [
+            (np.zeros((1600, 1), dtype=np.int16), False),
+            (np.zeros((1600, 1), dtype=np.int16), False),
+            (np.zeros((1600, 1), dtype=np.int16), False),
+            (high_energy_chunk, False),
+        ] + [(silent_chunk, False)] * 15
+
+        mock_stream.read.side_effect = stream_reads
+
+        with patch("stt._get_input_sample_rate", return_value=16000):
+            result = stt.capture_name(timeout=5, phrase_time_limit=5)
+
+        self.assertEqual(result, "Retry Success")
+        self.assertEqual(mock_rec_instance.recognize_google.call_count, 2)
+        self.assertTrue(stt.is_mic_muted())
+
 
 if __name__ == "__main__":
     unittest.main()
