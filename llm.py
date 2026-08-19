@@ -61,6 +61,9 @@ def _call_llm(prompt: str) -> str:
         if "choices" in data and len(data["choices"]) > 0:
             return data["choices"][0]["message"]["content"].strip()
         return ""
+    except requests.exceptions.ConnectionError:
+        print(f"[llm] Local LLM server not reachable at {config.LLM_BASE_URL}. Ensure LM Studio (or your local LLM server) is running.")
+        return ""
     except Exception as e:
         print(f"[llm] Error calling LLM: {e}")
         return ""
