@@ -6,6 +6,7 @@ from collections import defaultdict
 
 import cv2, numpy as np, tkinter as tk
 from tkinter import ttk, scrolledtext
+from PIL import Image, ImageTk
 
 import config, database, face, llm, tts, stt
 from dashboard import VisitorDashboard
@@ -17,6 +18,21 @@ _state_lock = threading.Lock()
 _gui_update_event = threading.Event()
 _dashboard = VisitorDashboard()
 _tts_lock = threading.Lock()
+
+_active_interaction = False
+_active_interaction_lock = threading.Lock()
+
+
+def _is_interaction_active() -> bool:
+    with _active_interaction_lock:
+        return _active_interaction
+
+
+def _set_interaction_active(active: bool) -> None:
+    global _active_interaction
+    with _active_interaction_lock:
+        _active_interaction = active
+
 
 def _is_in_cooldown(visitor_id: int) -> bool:
     with _state_lock:
@@ -57,47 +73,56 @@ def _host_say(app, text: str) -> None:
         tts.speak(text)
 
 def _greet_returning(visitor_id: int, name: str, set_status, app) -> None:
-    database.update_visitor_last_seen(visitor_id)
-    database.log_event(visitor_id, "return_visit")
-    set_status(f"Welcome back, {name}!", "green")
-    message = llm.generate_return_greeting(name, "")
-    _mark_greeted(visitor_id)
-    logger.info("Returning visitor %s: %s", name, message)
-    _host_say(app, message)
-    _dashboard.record_visitor(visitor_id, name, "return")
-    app.after(0, app._update_visitor_count)
+    _set_interaction_active(True)
+    try:
+        database.update_visitor_last_seen(visitor_id)
+        database.log_event(visitor_id, "return_visit")
+        set_status(f"Welcome back, {name}!", "green")
+        message = llm.generate_return_greeting(name, "")
+        _mark_greeted(visitor_id)
+        logger.info("Returning visitor %s: %s", name, message)
+        _host_say(app, message)
+        _dashboard.record_visitor(visitor_id, name, "return")
+        app.after(0, app._update_visitor_count)
 
-    # Start conversation with returning visitor
-    _start_conversation(visitor_id, name, set_status, app)
+        # Start conversation with returning visitor
+        _start_conversation(visitor_id, name, set_status, app)
+    finally:
+        _set_interaction_active(False)
 
 def _greet_new(encoding: np.ndarray, set_status, app) -> None:
-    set_status("New visitor - greeting and asking for name...", "orange")
-    warm_greeting = "Hi there, welcome to our open house! It is really nice to meet you. What name would you like me to call you?"
-    _host_say(app, warm_greeting)
-    heard_name = stt.capture_name(timeout=10, phrase_time_limit=5)
+    _set_interaction_active(True)
+    try:
+        set_status("New visitor - greeting and asking for name...", "orange")
+        warm_greeting = "Hi there, welcome to our open house! It is really nice to meet you. What name would you like me to call you?"
+        _host_say(app, warm_greeting)
+        heard_name = stt.capture_name(timeout=10, phrase_time_limit=5)
 
-    if heard_name:
-        name = heard_name.strip().capitalize()
-        _append_chat(app, "Visitor", heard_name)
-    else:
-        name = f"Visitor_{datetime.now().strftime('%Y%m%d_%H%M')}"
-        logger.info("No name captured, using fallback: %s", name)
-        set_status(f"Name not heard, using: {name}", "red")
-        _append_chat(app, "Visitor", "(no response)")
+        if heard_name:
+            name = heard_name.strip().capitalize()
+            _append_chat(app, "Visitor", heard_name)
+        else:
+            name = f"Visitor_{datetime.now().strftime('%Y%m%d_%H%M')}"
+            logger.info("No name captured, using fallback: %s", name)
+            set_status(f"Name not heard, using: {name}", "red")
+            _append_chat(app, "Visitor", "(no response)")
 
-    visitor_id = database.add_visitor(name, encoding)
-    database.log_event(visitor_id, "new_visitor_registered", f"Registered as {name}")
-    set_status(f"New visitor registered: {name}", "blue")
+        visitor_id = database.add_visitor(name, encoding)
+        face.register_known_encoding(visitor_id, name, encoding)
+        _mark_greeted(visitor_id)
+        database.log_event(visitor_id, "new_visitor_registered", f"Registered as {name}")
+        set_status(f"New visitor registered: {name}", "blue")
 
-    message = llm.generate_new_visitor_greeting(name)
-    _mark_greeted(visitor_id)
-    logger.info("New visitor %s: %s", name, message)
-    _host_say(app, message)
-    _dashboard.record_visitor(visitor_id, name, "new")
-    app.after(0, app._update_visitor_count)
+        message = llm.generate_new_visitor_greeting(name)
+        logger.info("New visitor %s: %s", name, message)
+        _host_say(app, message)
+        _dashboard.record_visitor(visitor_id, name, "new")
+        app.after(0, app._update_visitor_count)
 
-    # Start conversation with new visitor
-    _start_conversation(visitor_id, name, set_status, app)
+        # Start conversation with new visitor
+        _start_conversation(visitor_id, name, set_status, app)
+    finally:
+        _set_interaction_active(False)
 
 
 def _start_conversation(visitor_id: int, name: str, set_status, app) -> None:
@@ -141,56 +166,59 @@ def _start_conversation(visitor_id: int, name: str, set_status, app) -> None:
     set_status("Ready - waiting for next visitor", "green")
 
 def _camera_thread(cap, set_frame_cb, set_status, app):
-    """Background thread for face detection with motion detection."""
-    last_check = 0.0
+    """Background thread for fast camera feed and periodic face detection."""
+    last_detection_check = 0.0
+    detection_interval = 0.3  # Run face detection ~3 times per second
     consecutive_detections = 0
-    last_visitor_id = None
 
-    while cap.isOpened():
-        now = time.time()
-        if now - last_check < 1.0:
-            time.sleep(0.05)
-            continue
-        last_check = now
-
+    while cap.isOpened() and not app._stop_event.is_set():
         ok, frame = cap.read()
         if not ok or frame is None or frame.size == 0:
             set_status("Camera disconnected", "red")
-            time.sleep(1)
+            time.sleep(0.5)
             consecutive_detections = 0
-            last_visitor_id = None
             continue
 
         set_frame_cb(frame)
+
+        now = time.time()
+        if now - last_detection_check < detection_interval:
+            time.sleep(0.01)
+            continue
+        last_detection_check = now
+
+        # If an active interaction (greeting/conversation) is underway, skip triggering new greetings
+        if _is_interaction_active():
+            continue
 
         encoding, bbox = face.capture_face_encoding(frame)
         if encoding is None:
             set_status("Waiting for visitor", "gray")
             consecutive_detections = 0
-            last_visitor_id = None
             continue
 
         consecutive_detections += 1
 
-        known_names, known_embeddings = face.load_known_encodings()
+        known_ids, known_names, known_embeddings = face.load_known_encodings()
         if known_names:
             match_idx, distance = face.compare_faces(encoding, known_embeddings)
         else:
             match_idx, distance = None, float("inf")
 
-        # Only greet on first detection (motion into frame)
-        if consecutive_detections == 1:
-            if match_idx is not None and distance < config.FACE_THRESHOLD:
-                visitor = database.get_visitor_by_id(match_idx + 1)
-                if visitor and not _is_in_cooldown(visitor["id"]):
-                    threading.Thread(
-                        target=_greet_returning,
-                        args=(visitor["id"], visitor["name"], set_status, app),
-                        daemon=True,
-                    ).start()
-                else:
-                    set_status(f"Cooldown: {visitor['name'] if visitor else 'Unknown'}", "gray")
+        # Check match or new visitor
+        if match_idx is not None and distance < config.FACE_THRESHOLD:
+            visitor_id = known_ids[match_idx]
+            visitor_name = known_names[match_idx]
+            if _is_in_cooldown(visitor_id):
+                set_status(f"Visitor present: {visitor_name}", "green")
             else:
+                threading.Thread(
+                    target=_greet_returning,
+                    args=(visitor_id, visitor_name, set_status, app),
+                    daemon=True,
+                ).start()
+        else:
+            if consecutive_detections == 1:
                 threading.Thread(
                     target=_greet_new,
                     args=(encoding, set_status, app),
@@ -379,7 +407,7 @@ def run():
     logger.info("Initialising database at %s", config.DB_PATH)
     database.init_db()
     
-    known_names, _ = face.load_known_encodings()
+    known_ids, known_names, _ = face.load_known_encodings()
     logger.info("Loaded %d known visitors.", len(known_names))
     
     app = OpenhouseApp()

@@ -33,13 +33,32 @@ def _get_detector() -> cv2.CascadeClassifier:
     return _detector
 
 
-def load_known_encodings() -> tuple[list[str], list[np.ndarray]]:
-    """Load all known visitors and their face embeddings from the database."""
-    import database
-    visitors = database.get_all_visitors()
-    names = [v["name"] for v in visitors]
-    embeddings = [v["embedding"] for v in visitors]
-    return names, embeddings
+_known_cache: Optional[tuple[list[int], list[str], list[np.ndarray]]] = None
+
+
+def load_known_encodings(force_reload: bool = False) -> tuple[list[int], list[str], list[np.ndarray]]:
+    """Load all known visitors and their face embeddings from the database or cache."""
+    global _known_cache
+    if _known_cache is None or force_reload:
+        import database
+        visitors = database.get_all_visitors()
+        ids = [v["id"] for v in visitors]
+        names = [v["name"] for v in visitors]
+        embeddings = [v["embedding"] for v in visitors]
+        _known_cache = (ids, names, embeddings)
+    return _known_cache
+
+
+def register_known_encoding(visitor_id: int, name: str, encoding: np.ndarray) -> None:
+    """Add a newly registered visitor directly into the in-memory face cache."""
+    global _known_cache
+    if _known_cache is not None:
+        ids, names, embeddings = _known_cache
+        ids.append(visitor_id)
+        names.append(name)
+        embeddings.append(encoding)
+    else:
+        load_known_encodings(force_reload=True)
 
 
 def capture_face_encoding(frame: np.ndarray) -> tuple[Optional[np.ndarray], Optional[tuple]]:
