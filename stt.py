@@ -4,7 +4,10 @@ import logging
 import time
 import numpy as np
 import speech_recognition as sr
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception as _sd_err:
+    sd = None
 import config
 
 logger = logging.getLogger("openhouse")
@@ -41,14 +44,15 @@ def _resample_audio(audio_data: np.ndarray, orig_sr: int, target_sr: int) -> np.
 
 def _get_input_sample_rate() -> int:
     """Query default input device samplerate or fallback to 16000/44100."""
-    try:
-        device_info = sd.query_devices(kind="input")
-        if device_info and "default_samplerate" in device_info and device_info["default_samplerate"]:
-            sr = int(device_info["default_samplerate"])
-            if sr > 0:
-                return sr
-    except Exception as e:
-        logger.debug("[stt] Could not query input device samplerate: %s", e)
+    if sd is not None:
+        try:
+            device_info = sd.query_devices(kind="input")
+            if device_info and "default_samplerate" in device_info and device_info["default_samplerate"]:
+                sr = int(device_info["default_samplerate"])
+                if sr > 0:
+                    return sr
+        except Exception as e:
+            logger.debug("[stt] Could not query input device samplerate: %s", e)
     return 16000
 
 
@@ -93,6 +97,8 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
         energy_threshold = 300.0
 
         try:
+            if sd is None:
+                raise RuntimeError("sounddevice is not available")
             with sd.InputStream(samplerate=device_sr, channels=1, dtype="int16", blocksize=chunk_samples) as stream:
                 # 1. Quick ambient calibration (0.3s)
                 ambient_chunks = []
@@ -143,11 +149,12 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                                 break
         except Exception as stream_err:
             logger.warning("[stt] InputStream failed or not supported (%s), falling back to sd.rec", stream_err)
-            duration = min(timeout_val, limit_val)
-            rec_data = sd.rec(int(device_sr * duration), samplerate=device_sr, channels=1, dtype=np.int16)
-            sd.wait()
-            if len(rec_data) > 0:
-                audio_frames = [rec_data.flatten()]
+            if sd is not None:
+                duration = min(timeout_val, limit_val)
+                rec_data = sd.rec(int(device_sr * duration), samplerate=device_sr, channels=1, dtype=np.int16)
+                sd.wait()
+                if len(rec_data) > 0:
+                    audio_frames = [rec_data.flatten()]
 
         set_mic_muted(True)
 
@@ -165,37 +172,41 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
         audio_bytes = resampled_audio.tobytes()
         audio = sr.AudioData(audio_bytes, target_sr, 2)
 
-        # Perform Speech Recognition with retries and fallback
+        # Perform local speech recognition (offline only, no Google or remote API)
         stt_lang = getattr(config, "STT_LANGUAGE", "en")
 
-        # Try Google Speech Recognition with up to 3 retries for socket / network errors
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                text = recognizer.recognize_google(audio, language=stt_lang).strip()
-                if text:
-                    logger.info("[stt] Heard: %s", text)
-                    return text
-            except sr.UnknownValueError:
-                logger.info("[stt] Speech was detected but could not be understood.")
-                break
-            except sr.RequestError as req_err:
-                logger.warning("[stt] Speech recognition service error (attempt %d/%d): %s", attempt, max_retries, req_err)
-                if attempt < max_retries:
-                    time.sleep(0.3 * attempt)
-            except Exception as rec_err:
-                logger.warning("[stt] Speech recognition connection or unexpected error (attempt %d/%d): %s", attempt, max_retries, rec_err)
-                if attempt < max_retries:
-                    time.sleep(0.3 * attempt)
-
-        # Optional offline fallback using recognize_sphinx if installed
+        # 1. Try PocketSphinx (recognize_sphinx)
         try:
             text = recognizer.recognize_sphinx(audio, language=stt_lang).strip()
             if text:
-                logger.info("[stt] Heard (via sphinx fallback): %s", text)
+                logger.info("[stt] Heard (via sphinx): %s", text)
                 return text
-        except Exception:
-            pass
+        except sr.UnknownValueError:
+            logger.info("[stt] Speech was detected but could not be understood by sphinx.")
+        except Exception as sphinx_err:
+            logger.debug("[stt] Sphinx recognition error or unavailable: %s", sphinx_err)
+
+        # 2. Try Whisper local (recognize_whisper)
+        try:
+            text = recognizer.recognize_whisper(audio, model="base", language=stt_lang).strip()
+            if text:
+                logger.info("[stt] Heard (via whisper): %s", text)
+                return text
+        except sr.UnknownValueError:
+            logger.info("[stt] Speech was detected but could not be understood by whisper.")
+        except Exception as whisper_err:
+            logger.debug("[stt] Whisper recognition error or unavailable: %s", whisper_err)
+
+        # 3. Try Vosk local (recognize_vosk)
+        try:
+            text = recognizer.recognize_vosk(audio, language=stt_lang).strip()
+            if text:
+                logger.info("[stt] Heard (via vosk): %s", text)
+                return text
+        except sr.UnknownValueError:
+            logger.info("[stt] Speech was detected but could not be understood by vosk.")
+        except Exception as vosk_err:
+            logger.debug("[stt] Vosk recognition error or unavailable: %s", vosk_err)
 
     except sr.WaitTimeoutError:
         logger.info("[stt] No speech detected within timeout.")

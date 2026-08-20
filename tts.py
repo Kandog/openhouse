@@ -11,6 +11,7 @@ import threading
 import time
 import logging
 import config
+import stt
 
 logger = logging.getLogger("openhouse")
 _speak_lock = threading.Lock()
@@ -125,6 +126,9 @@ def speak(text: str) -> None:
 
     text = text.strip()
     logger.info("[tts] Speaking: %s", text)
+
+    # Ensure microphone is muted during any system response to speaker
+    stt.set_mic_muted(True)
 
     with _speak_lock:
         # Try pyttsx3 first (fast, local, offline Windows SAPI5)

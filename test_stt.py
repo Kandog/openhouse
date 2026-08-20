@@ -35,31 +35,29 @@ class TestSTT(unittest.TestCase):
         resample = stt._resample_audio(data, 44100, 16000)
         self.assertEqual(len(resample), 0)
 
-    @patch("stt.sd.query_devices")
-    def test_get_input_sample_rate(self, mock_query):
-        mock_query.return_value = {"default_samplerate": 48000.0}
+    @patch("stt.sd", create=True)
+    def test_get_input_sample_rate(self, mock_sd):
+        mock_sd.query_devices.return_value = {"default_samplerate": 48000.0}
         self.assertEqual(stt._get_input_sample_rate(), 48000)
 
-        mock_query.side_effect = Exception("No input device")
+        mock_sd.query_devices.side_effect = Exception("No input device")
         self.assertEqual(stt._get_input_sample_rate(), 16000)
 
-    @patch("stt.sd.InputStream")
+    @patch("stt.sd", create=True)
     @patch("stt.sr.Recognizer")
-    def test_capture_name_success(self, mock_recognizer_cls, mock_input_stream_cls):
+    def test_capture_name_success_sphinx(self, mock_recognizer_cls, mock_sd):
         # Mock Speech Recognition
         mock_rec_instance = MagicMock()
-        mock_rec_instance.recognize_google.return_value = "Hello Openhouse"
+        mock_rec_instance.recognize_sphinx.return_value = "Hello Openhouse"
         mock_recognizer_cls.return_value = mock_rec_instance
 
         # Mock sounddevice InputStream
         mock_stream = MagicMock()
-        mock_input_stream_cls.return_value.__enter__.return_value = mock_stream
+        mock_sd.InputStream.return_value.__enter__.return_value = mock_stream
 
-        # Speech chunk with high energy
         high_energy_chunk = np.full((1600, 1), 1000, dtype=np.int16)
         silent_chunk = np.zeros((1600, 1), dtype=np.int16)
 
-        # Ambient noise calibration (3 chunks), speech (1 chunk), silence (12 chunks -> 1.2s silence to trigger end of speech)
         stream_reads = [
             (np.zeros((1600, 1), dtype=np.int16), False),
             (np.zeros((1600, 1), dtype=np.int16), False),
@@ -74,36 +72,19 @@ class TestSTT(unittest.TestCase):
 
         self.assertEqual(result, "Hello Openhouse")
         self.assertTrue(stt.is_mic_muted())
+        # Ensure recognize_google is not called (fully local policy)
+        self.assertFalse(hasattr(mock_rec_instance, "recognize_google") and mock_rec_instance.recognize_google.called)
 
-    @patch("stt.sd.InputStream")
-    def test_capture_name_timeout(self, mock_input_stream_cls):
-        mock_stream = MagicMock()
-        mock_input_stream_cls.return_value.__enter__.return_value = mock_stream
-
-        # Silent chunks only
-        silent_chunk = np.zeros((1600, 1), dtype=np.int16)
-        mock_stream.read.return_value = (silent_chunk, False)
-
-        with patch("stt._get_input_sample_rate", return_value=16000):
-            result = stt.capture_name(timeout=0.2, phrase_time_limit=2)
-
-        self.assertIsNone(result)
-        self.assertTrue(stt.is_mic_muted())
-
-    @patch("stt.sd.InputStream")
+    @patch("stt.sd", create=True)
     @patch("stt.sr.Recognizer")
-    def test_capture_name_retry_on_network_error(self, mock_recognizer_cls, mock_input_stream_cls):
-        # Mock Speech Recognition with initial connection error then success
+    def test_capture_name_fallback_whisper(self, mock_recognizer_cls, mock_sd):
         mock_rec_instance = MagicMock()
-        mock_rec_instance.recognize_google.side_effect = [
-            OSError("[WinError 10054] An existing connection was forcibly closed"),
-            "Retry Success",
-        ]
+        mock_rec_instance.recognize_sphinx.side_effect = Exception("Sphinx unavailable")
+        mock_rec_instance.recognize_whisper.return_value = "Whisper Success"
         mock_recognizer_cls.return_value = mock_rec_instance
 
-        # Mock sounddevice InputStream
         mock_stream = MagicMock()
-        mock_input_stream_cls.return_value.__enter__.return_value = mock_stream
+        mock_sd.InputStream.return_value.__enter__.return_value = mock_stream
 
         high_energy_chunk = np.full((1600, 1), 1000, dtype=np.int16)
         silent_chunk = np.zeros((1600, 1), dtype=np.int16)
@@ -120,8 +101,32 @@ class TestSTT(unittest.TestCase):
         with patch("stt._get_input_sample_rate", return_value=16000):
             result = stt.capture_name(timeout=5, phrase_time_limit=5)
 
-        self.assertEqual(result, "Retry Success")
-        self.assertEqual(mock_rec_instance.recognize_google.call_count, 2)
+        self.assertEqual(result, "Whisper Success")
+        self.assertTrue(stt.is_mic_muted())
+
+    @patch("stt.sd", create=True)
+    def test_capture_name_timeout(self, mock_sd):
+        mock_stream = MagicMock()
+        mock_sd.InputStream.return_value.__enter__.return_value = mock_stream
+
+        # Silent chunks only
+        silent_chunk = np.zeros((1600, 1), dtype=np.int16)
+        mock_stream.read.return_value = (silent_chunk, False)
+
+        with patch("stt._get_input_sample_rate", return_value=16000):
+            result = stt.capture_name(timeout=0.2, phrase_time_limit=2)
+
+        self.assertIsNone(result)
+        self.assertTrue(stt.is_mic_muted())
+
+    @patch("tts._speak_pyttsx3", return_value=True)
+    def test_tts_mutes_mic(self, mock_pyttsx3):
+        import tts
+        stt.set_mic_muted(False)
+        self.assertFalse(stt.is_mic_muted())
+
+        tts.speak("Hello visitor")
+
         self.assertTrue(stt.is_mic_muted())
 
 
