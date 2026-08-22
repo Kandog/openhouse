@@ -8,6 +8,16 @@ import stt
 
 class TestSTT(unittest.TestCase):
 
+    def test_extract_name(self):
+        self.assertEqual(stt.extract_name("My name is John"), "John")
+        self.assertEqual(stt.extract_name("I am Alice"), "Alice")
+        self.assertEqual(stt.extract_name("Call me Bob Smith"), "Bob Smith")
+        self.assertEqual(stt.extract_name("Hi I'm Sarah"), "Sarah")
+        self.assertEqual(stt.extract_name("It's David"), "David")
+        self.assertEqual(stt.extract_name("uh Alex"), "Alex")
+        self.assertIsNone(stt.extract_name(""))
+        self.assertIsNone(stt.extract_name(None))
+
     def test_mic_muted_state(self):
         stt.set_mic_muted(True)
         self.assertTrue(stt.is_mic_muted())

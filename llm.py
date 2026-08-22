@@ -21,13 +21,35 @@ def _get_openhouse_doc() -> str:
     return ""
 
 
+def _trim_to_word_limit(text: str, max_words: int = 30) -> str:
+    """Ensure response text strictly contains fewer than 35 words (at most max_words)."""
+    if not text:
+        return text
+    words = text.strip().split()
+    if len(words) <= max_words:
+        return " ".join(words)
+
+    truncated_words = words[:max_words]
+    result = " ".join(truncated_words)
+
+    # Try to trim at the last complete sentence boundary if feasible
+    for p in [".", "!", "?"]:
+        last_idx = result.rfind(p)
+        if last_idx > 0 and len(result[: last_idx + 1].split()) >= 5:
+            return result[: last_idx + 1]
+
+    if not result.endswith((".", "!", "?")):
+        result += "."
+    return result
+
+
 _NEW_PROMPT = """\
 You are a warm, friendly host at an openhouse event.
 Reference Document:
 {doc_info}
 
 A new visitor has just arrived. Generate a short, personal welcome message.
-Use their name naturally. Keep it under 25 words. Do not add any preamble or explanation — just the message to speak aloud.
+Use their name naturally. Keep it strictly under 25 words (maximum 30 words). Do not add any preamble or explanation — just the message to speak aloud.
 Visitor name: {name}
 """
 
@@ -38,7 +60,7 @@ Reference Document:
 
 A returning visitor has come back. Generate a short, personal welcome-back message.
 Make it feel genuinely warm and recognisable — like you remember them.
-Keep it under 25 words. Do not add any preamble or explanation — just the message to speak aloud.
+Keep it strictly under 25 words (maximum 30 words). Do not add any preamble or explanation — just the message to speak aloud.
 Visitor name: {name}
 Last visited: {last_seen}
 """
@@ -79,16 +101,18 @@ def generate_chat_response(prompt: str) -> str:
         f"{doc_context}"
         "Instructions: ALWAYS reference the Open House Info Document above FIRST to answer any visitor questions regarding property details, price, features, address, agent, or event info.\n"
         f"User says: {prompt}\n"
-        "Keep your reply concise, warm, helpful, and under 35 words. "
+        "Keep your reply concise, warm, helpful, and strictly under 25 words (maximum 30 words). "
         "Do not add any preamble or explanation — speak the response directly."
     )
     try:
         reply = _call_llm(chat_prompt)
         if reply:
-            return reply
+            return _trim_to_word_limit(reply, max_words=30)
     except Exception:
         pass
-    return "Welcome! Please feel free to look around or ask me anything about this property!"
+    return _trim_to_word_limit(
+        "Welcome! Please feel free to look around or ask me anything about this property!", max_words=30
+    )
 
 
 def generate_new_visitor_greeting(name: str) -> str:
@@ -97,10 +121,12 @@ def generate_new_visitor_greeting(name: str) -> str:
     try:
         reply = _call_llm(prompt)
         if reply:
-            return reply
+            return _trim_to_word_limit(reply, max_words=30)
     except Exception:
         pass
-    return f"Hello {name}! Welcome to our open house! Feel free to look around and ask any questions."
+    return _trim_to_word_limit(
+        f"Hello {name}! Welcome to our open house! Feel free to look around and ask any questions.", max_words=30
+    )
 
 
 def generate_return_greeting(name: str, last_seen: str) -> str:
@@ -109,7 +135,9 @@ def generate_return_greeting(name: str, last_seen: str) -> str:
     try:
         reply = _call_llm(prompt)
         if reply:
-            return reply
+            return _trim_to_word_limit(reply, max_words=30)
     except Exception:
         pass
-    return f"Welcome back, {name}! Great to see you again at our open house!"
+    return _trim_to_word_limit(
+        f"Welcome back, {name}! Great to see you again at our open house!", max_words=30
+    )

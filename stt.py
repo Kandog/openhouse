@@ -1,6 +1,7 @@
 """Speech-to-text for capturing visitor voice responses via microphone."""
 
 import logging
+import re
 import time
 import numpy as np
 import speech_recognition as sr
@@ -13,6 +14,36 @@ import config
 logger = logging.getLogger("openhouse")
 
 _mic_muted = True  # Microphone is muted by default (during prompts, TTS, and LLM response)
+
+
+def extract_name(text: str | None) -> str | None:
+    """Extract a person's name from spoken phrase or clean speech text."""
+    if not text:
+        return None
+    cleaned = text.strip().strip(".!?,")
+    if not cleaned:
+        return None
+
+    # Common phrase patterns for identifying names
+    patterns = [
+        r"(?:my name is|i'm called|i am|i'm|call me|this is|it's|they call me)\s+([a-zA-Z\s'-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            words = extracted.split()
+            if words:
+                return " ".join(w.capitalize() for w in words[:2])
+
+    # If no pattern matched, filter out noise/filler words
+    words = cleaned.split()
+    if len(words) <= 4:
+        filtered = [w for w in words if w.lower() not in ("hi", "hello", "hey", "uh", "um", "yes", "no", "so", "is")]
+        if filtered:
+            return " ".join(w.capitalize() for w in filtered[:2])
+
+    return " ".join(w.capitalize() for w in words[:2])
 
 
 def is_mic_muted() -> bool:
@@ -91,14 +122,14 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
         start_time = time.time()
         speech_start_time = None
         silence_duration = 0.0
-        max_silence_after_speech = 1.2  # Stop recording 1.2s after user stops talking
+        max_silence_after_speech = 1.5  # Stop recording 1.5s after user stops talking
 
-        # Pre-roll buffer to retain lead-in audio (up to ~0.5s) before trigger
+        # Pre-roll buffer to retain lead-in audio (up to ~0.8s) before trigger
         pre_roll_buffer = []
-        max_pre_roll_chunks = 5
+        max_pre_roll_chunks = 8
 
         # Collect ambient noise baseline for 0.3s if possible, or set static energy threshold
-        energy_threshold = 300.0
+        energy_threshold = 100.0
 
         try:
             if sd is None:
@@ -114,8 +145,8 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                 if ambient_chunks:
                     ambient_data = np.concatenate(ambient_chunks, axis=0)
                     rms = float(np.sqrt(np.mean(ambient_data.astype(np.float64) ** 2)))
-                    # Cap initial threshold to prevent speech during calibration from over-inflating threshold
-                    energy_threshold = min(max(200.0, rms * 1.8), 1500.0)
+                    # Cap initial threshold to ensure soft speech is reliably detected
+                    energy_threshold = min(max(50.0, rms * 1.3), 1000.0)
                     logger.debug("[stt] Calibrated ambient threshold: %.1f", energy_threshold)
 
                 # 2. Streaming loop with VAD
