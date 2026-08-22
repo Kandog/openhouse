@@ -54,12 +54,13 @@ class TestSTT(unittest.TestCase):
         self.assertEqual(stt._get_input_sample_rate(), 16000)
 
     @patch("stt.sd", create=True)
-    @patch("stt.sr.Recognizer")
-    def test_capture_name_success_sphinx(self, mock_recognizer_cls, mock_sd):
-        # Mock Speech Recognition
-        mock_rec_instance = MagicMock()
-        mock_rec_instance.recognize_sphinx.return_value = "Hello Openhouse"
-        mock_recognizer_cls.return_value = mock_rec_instance
+    @patch("stt._get_faster_whisper_model")
+    def test_capture_name_success_faster_whisper(self, mock_get_fw_model, mock_sd):
+        mock_fw = MagicMock()
+        mock_segment = MagicMock()
+        mock_segment.text = "Hello Openhouse"
+        mock_fw.transcribe.return_value = ([mock_segment], None)
+        mock_get_fw_model.return_value = mock_fw
 
         # Mock sounddevice InputStream
         mock_stream = MagicMock()
@@ -83,14 +84,12 @@ class TestSTT(unittest.TestCase):
 
         self.assertEqual(result, "Hello Openhouse")
         self.assertTrue(stt.is_mic_muted())
-        # Ensure recognize_google is not called (fully local policy)
-        self.assertFalse(hasattr(mock_rec_instance, "recognize_google") and mock_rec_instance.recognize_google.called)
 
     @patch("stt.sd", create=True)
+    @patch("stt._get_faster_whisper_model", return_value=None)
     @patch("stt.sr.Recognizer")
-    def test_capture_name_fallback_whisper(self, mock_recognizer_cls, mock_sd):
+    def test_capture_name_fallback_whisper(self, mock_recognizer_cls, mock_get_fw_model, mock_sd):
         mock_rec_instance = MagicMock()
-        mock_rec_instance.recognize_sphinx.side_effect = Exception("Sphinx unavailable")
         mock_rec_instance.recognize_whisper.return_value = "Whisper Success"
         mock_recognizer_cls.return_value = mock_rec_instance
 
@@ -116,11 +115,13 @@ class TestSTT(unittest.TestCase):
         self.assertTrue(stt.is_mic_muted())
 
     @patch("stt.sd", create=True)
-    @patch("stt.sr.Recognizer")
-    def test_capture_name_pre_roll_buffer(self, mock_recognizer_cls, mock_sd):
-        mock_rec_instance = MagicMock()
-        mock_rec_instance.recognize_sphinx.return_value = "Pre roll captured"
-        mock_recognizer_cls.return_value = mock_rec_instance
+    @patch("stt._get_faster_whisper_model")
+    def test_capture_name_pre_roll_buffer(self, mock_get_fw_model, mock_sd):
+        mock_fw = MagicMock()
+        mock_segment = MagicMock()
+        mock_segment.text = "Pre roll captured"
+        mock_fw.transcribe.return_value = ([mock_segment], None)
+        mock_get_fw_model.return_value = mock_fw
 
         mock_stream = MagicMock()
         mock_sd.InputStream.return_value.__enter__.return_value = mock_stream
@@ -143,11 +144,9 @@ class TestSTT(unittest.TestCase):
             result = stt.capture_name(timeout=5, phrase_time_limit=5)
 
         self.assertEqual(result, "Pre roll captured")
-        # Verify AudioData received audio containing the pre-roll chunk
-        mock_rec_instance.recognize_sphinx.assert_called_once()
-        audio_arg = mock_rec_instance.recognize_sphinx.call_args[0][0]
-        # Check audio length includes calibration (0 chunks) + pre_roll (1 chunk) + high_energy (1 chunk) + 12 silent chunks (until 1.2s silence limit)
-        self.assertTrue(len(audio_arg.get_raw_data()) > 0)
+        mock_fw.transcribe.assert_called_once()
+        audio_arg = mock_fw.transcribe.call_args[0][0]
+        self.assertTrue(len(audio_arg) > 0)
 
     @patch("stt.sd", create=True)
     def test_capture_name_timeout(self, mock_sd):
