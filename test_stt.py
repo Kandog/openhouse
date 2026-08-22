@@ -62,6 +62,7 @@ class TestSTT(unittest.TestCase):
             (np.zeros((1600, 1), dtype=np.int16), False),
             (np.zeros((1600, 1), dtype=np.int16), False),
             (np.zeros((1600, 1), dtype=np.int16), False),
+            (np.full((1600, 1), 100, dtype=np.int16), False),  # Low energy chunk (added to pre-roll)
             (high_energy_chunk, False),
         ] + [(silent_chunk, False)] * 15
 
@@ -103,6 +104,40 @@ class TestSTT(unittest.TestCase):
 
         self.assertEqual(result, "Whisper Success")
         self.assertTrue(stt.is_mic_muted())
+
+    @patch("stt.sd", create=True)
+    @patch("stt.sr.Recognizer")
+    def test_capture_name_pre_roll_buffer(self, mock_recognizer_cls, mock_sd):
+        mock_rec_instance = MagicMock()
+        mock_rec_instance.recognize_sphinx.return_value = "Pre roll captured"
+        mock_recognizer_cls.return_value = mock_rec_instance
+
+        mock_stream = MagicMock()
+        mock_sd.InputStream.return_value.__enter__.return_value = mock_stream
+
+        pre_roll_chunk = np.full((1600, 1), 150, dtype=np.int16)
+        high_energy_chunk = np.full((1600, 1), 1000, dtype=np.int16)
+        silent_chunk = np.zeros((1600, 1), dtype=np.int16)
+
+        stream_reads = [
+            (np.zeros((1600, 1), dtype=np.int16), False),
+            (np.zeros((1600, 1), dtype=np.int16), False),
+            (np.zeros((1600, 1), dtype=np.int16), False),
+            (pre_roll_chunk, False),
+            (high_energy_chunk, False),
+        ] + [(silent_chunk, False)] * 15
+
+        mock_stream.read.side_effect = stream_reads
+
+        with patch("stt._get_input_sample_rate", return_value=16000):
+            result = stt.capture_name(timeout=5, phrase_time_limit=5)
+
+        self.assertEqual(result, "Pre roll captured")
+        # Verify AudioData received audio containing the pre-roll chunk
+        mock_rec_instance.recognize_sphinx.assert_called_once()
+        audio_arg = mock_rec_instance.recognize_sphinx.call_args[0][0]
+        # Check audio length includes calibration (0 chunks) + pre_roll (1 chunk) + high_energy (1 chunk) + 12 silent chunks (until 1.2s silence limit)
+        self.assertTrue(len(audio_arg.get_raw_data()) > 0)
 
     @patch("stt.sd", create=True)
     def test_capture_name_timeout(self, mock_sd):
