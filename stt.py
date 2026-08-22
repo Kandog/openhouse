@@ -9,11 +9,30 @@ try:
     import sounddevice as sd
 except Exception as _sd_err:
     sd = None
+
+try:
+    from faster_whisper import WhisperModel
+except Exception as _fw_err:
+    WhisperModel = None
+
 import config
 
 logger = logging.getLogger("openhouse")
 
 _mic_muted = True  # Microphone is muted by default (during prompts, TTS, and LLM response)
+_fw_model = None
+
+
+def _get_faster_whisper_model():
+    """Lazy initialization of faster-whisper tiny model."""
+    global _fw_model
+    if _fw_model is None and WhisperModel is not None:
+        try:
+            logger.info("[stt] Initializing faster-whisper tiny model...")
+            _fw_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        except Exception as e:
+            logger.error("[stt] Failed to initialize faster-whisper model: %s", e)
+    return _fw_model
 
 
 def extract_name(text: str | None) -> str | None:
@@ -218,16 +237,18 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
         # Perform local speech recognition (offline only, no Google or remote API)
         stt_lang = getattr(config, "STT_LANGUAGE", "en")
 
-        # 1. Try PocketSphinx (recognize_sphinx)
-        try:
-            text = recognizer.recognize_sphinx(audio, language=stt_lang).strip()
-            if text:
-                logger.info("[stt] Heard (via sphinx): %s", text)
-                return text
-        except sr.UnknownValueError:
-            logger.info("[stt] Speech was detected but could not be understood by sphinx.")
-        except Exception as sphinx_err:
-            logger.debug("[stt] Sphinx recognition error or unavailable: %s", sphinx_err)
+        # 1. Try faster-whisper tiny model
+        fw_model = _get_faster_whisper_model()
+        if fw_model is not None:
+            try:
+                audio_float32 = resampled_audio.astype(np.float32) / 32768.0
+                segments, _ = fw_model.transcribe(audio_float32, language=stt_lang)
+                text = "".join([s.text for s in segments]).strip()
+                if text:
+                    logger.info("[stt] Heard (via faster-whisper): %s", text)
+                    return text
+            except Exception as fw_err:
+                logger.debug("[stt] faster-whisper recognition error or unavailable: %s", fw_err)
 
         # 2. Try Whisper local (recognize_whisper)
         try:
