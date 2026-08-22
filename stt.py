@@ -93,6 +93,10 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
         silence_duration = 0.0
         max_silence_after_speech = 1.2  # Stop recording 1.2s after user stops talking
 
+        # Pre-roll buffer to retain lead-in audio (up to ~0.5s) before trigger
+        pre_roll_buffer = []
+        max_pre_roll_chunks = 5
+
         # Collect ambient noise baseline for 0.3s if possible, or set static energy threshold
         energy_threshold = 300.0
 
@@ -110,7 +114,8 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                 if ambient_chunks:
                     ambient_data = np.concatenate(ambient_chunks, axis=0)
                     rms = float(np.sqrt(np.mean(ambient_data.astype(np.float64) ** 2)))
-                    energy_threshold = max(300.0, rms * 2.5)
+                    # Cap initial threshold to prevent speech during calibration from over-inflating threshold
+                    energy_threshold = min(max(200.0, rms * 1.8), 1500.0)
                     logger.debug("[stt] Calibrated ambient threshold: %.1f", energy_threshold)
 
                 # 2. Streaming loop with VAD
@@ -138,6 +143,9 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                             logger.info("[stt] Speech detected! Recording response...")
                             speech_started = True
                             speech_start_time = time.time()
+                            # Include pre-roll buffer when speech starts to capture initial consonant/syllable
+                            audio_frames.extend(pre_roll_buffer)
+                            pre_roll_buffer.clear()
                         silence_duration = 0.0
                         audio_frames.append(chunk_flat)
                     else:
@@ -147,6 +155,10 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                             if silence_duration >= max_silence_after_speech:
                                 logger.info("[stt] End of speech detected (silence for %.1fs)", silence_duration)
                                 break
+                        else:
+                            pre_roll_buffer.append(chunk_flat)
+                            if len(pre_roll_buffer) > max_pre_roll_chunks:
+                                pre_roll_buffer.pop(0)
         except Exception as stream_err:
             logger.warning("[stt] InputStream failed or not supported (%s), falling back to sd.rec", stream_err)
             if sd is not None:
