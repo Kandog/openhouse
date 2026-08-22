@@ -99,7 +99,8 @@ def _greet_new(encoding: np.ndarray, set_status, app) -> None:
         heard_name = stt.capture_name(timeout=10, phrase_time_limit=5)
 
         if heard_name:
-            name = heard_name.strip().capitalize()
+            extracted = stt.extract_name(heard_name)
+            name = extracted if extracted else heard_name.strip().capitalize()
             _append_chat(app, "Visitor", heard_name)
         else:
             name = f"Visitor_{datetime.now().strftime('%Y%m%d_%H%M')}"
@@ -391,16 +392,28 @@ class OpenhouseApp(tk.Tk):
 
 def run():
     import logging as _logging
-    
+    import sys
+
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     log_dir = config.LOG_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     _logging.basicConfig(
         level=getattr(_logging, config.LOG_LEVEL, _logging.INFO),
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         handlers=[
-            _logging.FileHandler(log_dir / "app.log"),
-            _logging.StreamHandler(),
+            _logging.FileHandler(log_dir / "app.log", encoding="utf-8"),
+            _logging.StreamHandler(sys.stdout),
         ],
     )
     
