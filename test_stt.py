@@ -74,6 +74,7 @@ class TestSTT(unittest.TestCase):
             (np.zeros((1600, 1), dtype=np.int16), False),
             (np.full((1600, 1), 100, dtype=np.int16), False),  # Low energy chunk (added to pre-roll)
             (high_energy_chunk, False),
+            (high_energy_chunk, False),
         ] + [(silent_chunk, False)] * 15
 
         mock_stream.read.side_effect = stream_reads
@@ -105,6 +106,7 @@ class TestSTT(unittest.TestCase):
             (np.zeros((1600, 1), dtype=np.int16), False),
             (np.zeros((1600, 1), dtype=np.int16), False),
             (high_energy_chunk, False),
+            (high_energy_chunk, False),
         ] + [(silent_chunk, False)] * 15
 
         mock_stream.read.side_effect = stream_reads
@@ -134,6 +136,7 @@ class TestSTT(unittest.TestCase):
             (np.zeros((1600, 1), dtype=np.int16), False),
             (np.zeros((1600, 1), dtype=np.int16), False),
             (pre_roll_chunk, False),
+            (high_energy_chunk, False),
             (high_energy_chunk, False),
         ] + [(silent_chunk, False)] * 15
 

@@ -113,23 +113,14 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
             device_sr,
         )
 
-        audio_frames = []
         chunk_duration = 0.1  # 100ms chunks
         chunk_samples = int(device_sr * chunk_duration)
 
-        # Voice activity detection parameters
-        speech_started = False
+        max_silence_after_speech = 1.2  # Stop recording 1.2s after user stops talking
+        max_pre_roll_chunks = 8  # Retain ~0.8s pre-roll audio buffer
+        required_high_chunks = 2  # Require 2 consecutive high-energy chunks (200ms) to activate
+
         start_time = time.time()
-        speech_start_time = None
-        silence_duration = 0.0
-        max_silence_after_speech = 1.5  # Stop recording 1.5s after user stops talking
-
-        # Pre-roll buffer to retain lead-in audio (up to ~0.8s) before trigger
-        pre_roll_buffer = []
-        max_pre_roll_chunks = 8
-
-        # Collect ambient noise baseline for 0.3s if possible, or set static energy threshold
-        energy_threshold = 100.0
 
         try:
             if sd is None:
@@ -142,54 +133,120 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                     if not overflowed and len(chunk) > 0:
                         ambient_chunks.append(chunk)
 
+                energy_threshold = 200.0
                 if ambient_chunks:
                     ambient_data = np.concatenate(ambient_chunks, axis=0)
                     rms = float(np.sqrt(np.mean(ambient_data.astype(np.float64) ** 2)))
-                    # Cap initial threshold to ensure soft speech is reliably detected
-                    energy_threshold = min(max(50.0, rms * 1.3), 1000.0)
+                    energy_threshold = min(max(150.0, rms * 1.5), 1000.0)
                     logger.debug("[stt] Calibrated ambient threshold: %.1f", energy_threshold)
 
-                # 2. Streaming loop with VAD
-                while True:
-                    now = time.time()
-                    elapsed = now - start_time
+                # 2. Continuous listening loop with retry
+                while time.time() - start_time < timeout_val:
+                    audio_frames = []
+                    pre_roll_buffer = []
+                    speech_started = False
+                    speech_start_time = None
+                    silence_duration = 0.0
+                    high_energy_count = 0
 
-                    if not speech_started and elapsed > timeout_val:
+                    while True:
+                        now = time.time()
+                        elapsed = now - start_time
+
+                        if not speech_started and elapsed > timeout_val:
+                            break
+
+                        if speech_started and (now - speech_start_time) > limit_val:
+                            logger.info("[stt] Reached maximum phrase limit (%ss)", limit_val)
+                            break
+
+                        chunk, _ = stream.read(chunk_samples)
+                        if len(chunk) == 0:
+                            continue
+
+                        chunk_flat = chunk.flatten()
+                        chunk_rms = float(np.sqrt(np.mean(chunk_flat.astype(np.float64) ** 2)))
+
+                        if chunk_rms > energy_threshold:
+                            high_energy_count += 1
+                            if not speech_started:
+                                pre_roll_buffer.append(chunk_flat)
+                                if len(pre_roll_buffer) > max_pre_roll_chunks:
+                                    pre_roll_buffer.pop(0)
+
+                                if high_energy_count >= required_high_chunks:
+                                    logger.info("[stt] Speech detected! Recording response...")
+                                    speech_started = True
+                                    speech_start_time = time.time()
+                                    audio_frames.extend(pre_roll_buffer)
+                                    pre_roll_buffer.clear()
+                            else:
+                                silence_duration = 0.0
+                                audio_frames.append(chunk_flat)
+                        else:
+                            high_energy_count = 0
+                            if speech_started:
+                                silence_duration += chunk_duration
+                                audio_frames.append(chunk_flat)
+                                if silence_duration >= max_silence_after_speech:
+                                    logger.info("[stt] End of speech detected (silence for %.1fs)", silence_duration)
+                                    break
+                            else:
+                                pre_roll_buffer.append(chunk_flat)
+                                if len(pre_roll_buffer) > max_pre_roll_chunks:
+                                    pre_roll_buffer.pop(0)
+
+                    if not audio_frames:
                         logger.info("[stt] Timeout: No speech detected within %ss", timeout_val)
                         break
 
-                    if speech_started and (now - speech_start_time) > limit_val:
-                        logger.info("[stt] Reached maximum phrase limit (%ss)", limit_val)
-                        break
+                    # Combine recorded chunks into single audio array
+                    raw_audio = np.concatenate(audio_frames, axis=0)
 
-                    chunk, _ = stream.read(chunk_samples)
-                    if len(chunk) == 0:
-                        continue
+                    # Resample if device sample rate is not 16000 Hz
+                    resampled_audio = _resample_audio(raw_audio, device_sr, target_sr)
 
-                    chunk_flat = chunk.flatten()
-                    chunk_rms = float(np.sqrt(np.mean(chunk_flat.astype(np.float64) ** 2)))
+                    # Convert to AudioData format for SpeechRecognition
+                    audio_bytes = resampled_audio.tobytes()
+                    audio = sr.AudioData(audio_bytes, target_sr, 2)
 
-                    if chunk_rms > energy_threshold:
-                        if not speech_started:
-                            logger.info("[stt] Speech detected! Recording response...")
-                            speech_started = True
-                            speech_start_time = time.time()
-                            # Include pre-roll buffer when speech starts to capture initial consonant/syllable
-                            audio_frames.extend(pre_roll_buffer)
-                            pre_roll_buffer.clear()
-                        silence_duration = 0.0
-                        audio_frames.append(chunk_flat)
-                    else:
-                        if speech_started:
-                            silence_duration += chunk_duration
-                            audio_frames.append(chunk_flat)
-                            if silence_duration >= max_silence_after_speech:
-                                logger.info("[stt] End of speech detected (silence for %.1fs)", silence_duration)
-                                break
-                        else:
-                            pre_roll_buffer.append(chunk_flat)
-                            if len(pre_roll_buffer) > max_pre_roll_chunks:
-                                pre_roll_buffer.pop(0)
+                    stt_lang = getattr(config, "STT_LANGUAGE", "en")
+
+                    # 1. Try PocketSphinx (recognize_sphinx)
+                    try:
+                        text = recognizer.recognize_sphinx(audio, language=stt_lang).strip()
+                        if text:
+                            logger.info("[stt] Heard (via sphinx): %s", text)
+                            return text
+                    except sr.UnknownValueError:
+                        logger.info("[stt] Speech was detected but could not be understood by sphinx.")
+                    except Exception as sphinx_err:
+                        logger.debug("[stt] Sphinx recognition error or unavailable: %s", sphinx_err)
+
+                    # 2. Try Whisper local (recognize_whisper)
+                    try:
+                        text = recognizer.recognize_whisper(audio, model="base", language=stt_lang).strip()
+                        if text:
+                            logger.info("[stt] Heard (via whisper): %s", text)
+                            return text
+                    except sr.UnknownValueError:
+                        logger.info("[stt] Speech was detected but could not be understood by whisper.")
+                    except Exception as whisper_err:
+                        logger.debug("[stt] Whisper recognition error or unavailable: %s", whisper_err)
+
+                    # 3. Try Vosk local (recognize_vosk)
+                    try:
+                        text = recognizer.recognize_vosk(audio, language=stt_lang).strip()
+                        if text:
+                            logger.info("[stt] Heard (via vosk): %s", text)
+                            return text
+                    except sr.UnknownValueError:
+                        logger.info("[stt] Speech was detected but could not be understood by vosk.")
+                    except Exception as vosk_err:
+                        logger.debug("[stt] Vosk recognition error or unavailable: %s", vosk_err)
+
+                    logger.info("[stt] Audio clip did not produce recognizable text. Continuing to listen...")
+
         except Exception as stream_err:
             logger.warning("[stt] InputStream failed or not supported (%s), falling back to sd.rec", stream_err)
             if sd is not None:
@@ -197,59 +254,28 @@ def capture_name(timeout: int | None = None, phrase_time_limit: int | None = Non
                 rec_data = sd.rec(int(device_sr * duration), samplerate=device_sr, channels=1, dtype=np.int16)
                 sd.wait()
                 if len(rec_data) > 0:
-                    audio_frames = [rec_data.flatten()]
-
-        set_mic_muted(True)
-
-        if not audio_frames:
-            logger.info("[stt] No audio captured.")
-            return None
-
-        # Combine recorded chunks into single audio array
-        raw_audio = np.concatenate(audio_frames, axis=0)
-
-        # Resample if device sample rate is not 16000 Hz
-        resampled_audio = _resample_audio(raw_audio, device_sr, target_sr)
-
-        # Convert to AudioData format for SpeechRecognition
-        audio_bytes = resampled_audio.tobytes()
-        audio = sr.AudioData(audio_bytes, target_sr, 2)
-
-        # Perform local speech recognition (offline only, no Google or remote API)
-        stt_lang = getattr(config, "STT_LANGUAGE", "en")
-
-        # 1. Try PocketSphinx (recognize_sphinx)
-        try:
-            text = recognizer.recognize_sphinx(audio, language=stt_lang).strip()
-            if text:
-                logger.info("[stt] Heard (via sphinx): %s", text)
-                return text
-        except sr.UnknownValueError:
-            logger.info("[stt] Speech was detected but could not be understood by sphinx.")
-        except Exception as sphinx_err:
-            logger.debug("[stt] Sphinx recognition error or unavailable: %s", sphinx_err)
-
-        # 2. Try Whisper local (recognize_whisper)
-        try:
-            text = recognizer.recognize_whisper(audio, model="base", language=stt_lang).strip()
-            if text:
-                logger.info("[stt] Heard (via whisper): %s", text)
-                return text
-        except sr.UnknownValueError:
-            logger.info("[stt] Speech was detected but could not be understood by whisper.")
-        except Exception as whisper_err:
-            logger.debug("[stt] Whisper recognition error or unavailable: %s", whisper_err)
-
-        # 3. Try Vosk local (recognize_vosk)
-        try:
-            text = recognizer.recognize_vosk(audio, language=stt_lang).strip()
-            if text:
-                logger.info("[stt] Heard (via vosk): %s", text)
-                return text
-        except sr.UnknownValueError:
-            logger.info("[stt] Speech was detected but could not be understood by vosk.")
-        except Exception as vosk_err:
-            logger.debug("[stt] Vosk recognition error or unavailable: %s", vosk_err)
+                    raw_audio = rec_data.flatten()
+                    resampled_audio = _resample_audio(raw_audio, device_sr, target_sr)
+                    audio = sr.AudioData(resampled_audio.tobytes(), target_sr, 2)
+                    stt_lang = getattr(config, "STT_LANGUAGE", "en")
+                    try:
+                        text = recognizer.recognize_sphinx(audio, language=stt_lang).strip()
+                        if text:
+                            return text
+                    except Exception:
+                        pass
+                    try:
+                        text = recognizer.recognize_whisper(audio, model="base", language=stt_lang).strip()
+                        if text:
+                            return text
+                    except Exception:
+                        pass
+                    try:
+                        text = recognizer.recognize_vosk(audio, language=stt_lang).strip()
+                        if text:
+                            return text
+                    except Exception:
+                        pass
 
     except sr.WaitTimeoutError:
         logger.info("[stt] No speech detected within timeout.")
